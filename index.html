@@ -122,6 +122,45 @@
     background: #451a1a; border: 1px solid #7f1d1d; color: #fecaca;
     border-radius: 14px; padding: 12px 16px; font-size: .9rem; display: none; line-height: 1.6;
   }
+
+  .mode-tabs {
+    display: flex; background: var(--card); border: 1px solid #334155;
+    border-radius: 999px; padding: 4px; gap: 4px;
+  }
+  .mode-tabs button {
+    flex: 1; padding: 10px 0; border: none; border-radius: 999px; background: none;
+    color: var(--muted); font-size: .92rem; font-weight: 600; cursor: pointer; transition: all .2s;
+  }
+  .mode-tabs button.active {
+    background: linear-gradient(145deg, var(--accent), var(--accent2)); color: #fff;
+  }
+
+  .talk-area { display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  .talk-head { display: flex; justify-content: space-between; align-items: center; }
+  .talk-head h2 { font-size: .85rem; color: var(--muted); font-weight: 600; letter-spacing: 1px; }
+  .talk-head button { background: none; border: none; color: #64748b; font-size: .8rem; cursor: pointer; }
+  .bubbles {
+    flex: 1; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+    min-height: 220px; max-height: 55dvh; padding: 4px 2px;
+  }
+  .bubble { max-width: 84%; padding: 11px 15px; border-radius: 16px; }
+  .bubble .orig { font-size: .8rem; opacity: .65; margin-bottom: 3px; }
+  .bubble .trans { font-size: 1.18rem; font-weight: 500; line-height: 1.45; }
+  .bubble.a { align-self: flex-start; background: #1d3a5f; border-bottom-left-radius: 4px; }
+  .bubble.b { align-self: flex-end; background: #3b3470; border-bottom-right-radius: 4px; }
+  .bubble .speak { background: none; border: none; font-size: 1rem; cursor: pointer; padding: 0 2px; }
+  .talk-interim { text-align: center; color: var(--muted); min-height: 1.5em; font-size: 1rem; }
+  .talk-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-bottom: 20px; }
+  .talk-btns button {
+    padding: 20px 8px; border-radius: var(--radius); border: none; color: #fff;
+    font-size: 1.05rem; font-weight: 700; cursor: pointer; transition: all .2s;
+  }
+  #talkA { background: linear-gradient(145deg, #2563eb, #38bdf8); box-shadow: 0 4px 16px rgba(56,189,248,.25); }
+  #talkB { background: linear-gradient(145deg, #7c3aed, #a78bfa); box-shadow: 0 4px 16px rgba(167,139,250,.25); }
+  .talk-btns button.listening {
+    background: linear-gradient(145deg, #ef4444, #f87171) !important;
+    animation: pulse 1.4s infinite;
+  }
 </style>
 </head>
 <body>
@@ -132,6 +171,11 @@
   </header>
 
   <div class="warn" id="warn"></div>
+
+  <div class="mode-tabs">
+    <button id="modeSingle" class="active">🎯 單向翻譯</button>
+    <button id="modeTalk">💬 雙向對話</button>
+  </div>
 
   <div class="lang-bar">
     <select id="srcLang"></select>
@@ -147,6 +191,19 @@
     <div class="panel target">
       <div class="label" id="dstLabel">翻譯結果</div>
       <div class="content" id="dstText"><span class="placeholder">翻譯會即時出現在這裡</span></div>
+    </div>
+  </div>
+
+  <div class="talk-area" id="talkArea" style="display:none">
+    <div class="talk-head">
+      <h2>輪流按下方自己語言的按鈕說話</h2>
+      <button id="talkClear">清除</button>
+    </div>
+    <div class="bubbles" id="bubbles"></div>
+    <div class="talk-interim" id="talkInterim"></div>
+    <div class="talk-btns">
+      <button id="talkA">🎤</button>
+      <button id="talkB">🎤</button>
     </div>
   </div>
 
@@ -383,6 +440,7 @@ function onLangChange() {
   localStorage.setItem('srcLang', srcSel.value);
   localStorage.setItem('dstLang', dstSel.value);
   if (listening) { stopListening(); startListening(); }
+  updateTalkLabels();
 }
 srcSel.onchange = onLangChange;
 dstSel.onchange = onLangChange;
@@ -427,6 +485,118 @@ async function doTypeTranslate() {
 }
 $('typeBtn').onclick = doTypeTranslate;
 $('typeInput').addEventListener('keydown', e => { if (e.key === 'Enter') doTypeTranslate(); });
+
+/* ---------- 雙向對話模式 ---------- */
+let mode = localStorage.getItem('mode') || 'single';
+let talkSide = null;
+let talkRec = null;
+
+function updateTalkLabels() {
+  $('talkA').textContent = '🎤 ' + langOf(srcSel.value).label;
+  $('talkB').textContent = '🎤 ' + langOf(dstSel.value).label;
+}
+
+function applyMode() {
+  const talk = mode === 'talk';
+  $('modeSingle').classList.toggle('active', !talk);
+  $('modeTalk').classList.toggle('active', talk);
+  document.querySelector('.panels').style.display = talk ? 'none' : '';
+  document.querySelector('.mic-row').style.display = talk ? 'none' : '';
+  $('status').style.display = talk ? 'none' : '';
+  document.querySelector('.type-row').style.display = talk ? 'none' : '';
+  document.querySelector('.history').style.display = talk ? 'none' : '';
+  $('talkArea').style.display = talk ? '' : 'none';
+  if (talk) { if (listening) stopListening(); updateTalkLabels(); }
+  else { stopTalk(); }
+  localStorage.setItem('mode', mode);
+}
+
+function addBubble(side, orig, trans, toLang) {
+  const div = document.createElement('div');
+  div.className = 'bubble ' + (side === 'A' ? 'a' : 'b');
+  const o = document.createElement('div'); o.className = 'orig'; o.textContent = orig;
+  const t = document.createElement('div'); t.className = 'trans'; t.textContent = trans + ' ';
+  const btn = document.createElement('button');
+  btn.className = 'speak'; btn.textContent = '🔊';
+  btn.onclick = () => speak(trans, toLang);
+  t.append(btn);
+  div.append(o, t);
+  $('bubbles').append(div);
+  $('bubbles').scrollTop = $('bubbles').scrollHeight;
+}
+
+async function handleTalkFinal(text, side, from, to) {
+  $('talkInterim').textContent = '翻譯中…';
+  try {
+    const out = await translateText(text, from, to);
+    addBubble(side, text, out, to);
+    $('talkInterim').textContent = '';
+    if (ttsOn) speak(out, to);
+  } catch (e) {
+    $('talkInterim').textContent = '⚠️ 翻譯失敗，請檢查網路';
+  }
+}
+
+function startTalk(side) {
+  if (!SR) return;
+  if (talkSide) { stopTalk(); return; }
+  const from = side === 'A' ? srcSel.value : dstSel.value;
+  const to   = side === 'A' ? dstSel.value : srcSel.value;
+  talkSide = side;
+  const btn = side === 'A' ? $('talkA') : $('talkB');
+  btn.classList.add('listening');
+  $('talkInterim').textContent = '🔴 聆聽中，請說話…';
+  const r = new SR();
+  talkRec = r;
+  r.lang = langOf(from).speech;
+  r.continuous = false;
+  r.interimResults = true;
+  let gotFinal = false;
+  r.onresult = ev => {
+    let finalText = '', interim = '';
+    for (let i = 0; i < ev.results.length; i++) {
+      const t = ev.results[i][0].transcript;
+      if (ev.results[i].isFinal) finalText += t; else interim += t;
+    }
+    if (interim.trim()) $('talkInterim').textContent = interim.trim();
+    if (finalText.trim() && !gotFinal) {
+      gotFinal = true;
+      handleTalkFinal(finalText.trim(), side, from, to);
+    }
+  };
+  r.onerror = ev => {
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      $('talkInterim').textContent = '⚠️ 請允許使用麥克風（點網址列旁的鎖頭圖示）';
+    } else if (ev.error === 'no-speech') {
+      $('talkInterim').textContent = '沒聽到聲音，再按一次試試';
+    }
+  };
+  r.onend = () => {
+    btn.classList.remove('listening');
+    talkSide = null;
+    talkRec = null;
+    if (!gotFinal && $('talkInterim').textContent.startsWith('🔴')) {
+      $('talkInterim').textContent = '';
+    }
+  };
+  try { r.start(); } catch (e) {}
+}
+
+function stopTalk() {
+  if (talkRec) { try { talkRec.stop(); } catch (e) {} }
+  $('talkA').classList.remove('listening');
+  $('talkB').classList.remove('listening');
+  talkSide = null;
+}
+
+$('modeSingle').onclick = () => { mode = 'single'; applyMode(); };
+$('modeTalk').onclick = () => { mode = 'talk'; applyMode(); };
+$('talkA').onclick = () => startTalk('A');
+$('talkB').onclick = () => startTalk('B');
+$('talkClear').onclick = () => { $('bubbles').textContent = ''; };
+
+updateTalkLabels();
+applyMode();
 </script>
 </body>
 </html>
