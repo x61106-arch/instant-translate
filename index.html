@@ -460,6 +460,7 @@ function onLangChange() {
   localStorage.setItem('srcLang', srcSel.value);
   localStorage.setItem('dstLang', dstSel.value);
   if (listening) { stopListening(); startListening(); }
+  if (meetingOn) { stopMeeting(); startMeeting(); }
   updateTalkLabels();
 }
 srcSel.onchange = onLangChange;
@@ -581,19 +582,28 @@ function detectByScript(text) {
   return '';
 }
 
-// 判斷這句是誰說的：是右邊語言 → 對方（B），翻回左邊；否則當自己（A），翻到右邊
+// 判斷這句是誰說的：右邊語言 → 對方（B），翻回左邊；左邊語言 → 自己（A），翻到右邊；
+// 兩邊都不是 → 第三種語言，從偵測到的語言直接翻成左邊語言（不能拿左邊語言當來源硬翻）
 async function smartTranslate(text) {
   const guess = detectByScript(text);
-  const isDst = g => g && g === baseLang(dstSel.value) && g !== baseLang(srcSel.value);
+  const srcBase = baseLang(srcSel.value), dstBase = baseLang(dstSel.value);
+  const codeFor = g => (LANGS.find(l => baseLang(l.code) === g) || { code: g }).code;
   if (guess) {
-    if (isDst(guess)) {
+    if (guess === dstBase && guess !== srcBase) {
       return { side: 'B', toLang: srcSel.value, out: await translateText(text, dstSel.value, srcSel.value) };
     }
-    return { side: 'A', toLang: dstSel.value, out: await translateText(text, srcSel.value, dstSel.value) };
+    if (guess === srcBase) {
+      return { side: 'A', toLang: dstSel.value, out: await translateText(text, srcSel.value, dstSel.value) };
+    }
+    return { side: 'B', toLang: srcSel.value, out: await translateText(text, codeFor(guess), srcSel.value), foreign: guess };
   }
   const first = await translateDetect(text, dstSel.value);
-  if (isDst(baseLang(first.detected))) {
+  const det = baseLang(first.detected);
+  if (det && det === dstBase && det !== srcBase) {
     return { side: 'B', toLang: srcSel.value, out: await translateText(text, first.detected, srcSel.value) };
+  }
+  if (det && det !== srcBase && det !== dstBase) {
+    return { side: 'B', toLang: srcSel.value, out: await translateText(text, first.detected, srcSel.value), foreign: det };
   }
   return { side: 'A', toLang: dstSel.value, out: first.out };
 }
@@ -602,6 +612,12 @@ async function processUtterance(text) {
   try {
     const r = await smartTranslate(text);
     addBubble(r.side, text, r.out, r.toLang, true);
+    if (r.foreign) {
+      const f = LANGS.find(l => baseLang(l.code) === r.foreign);
+      const fLabel = f ? f.label : r.foreign;
+      $('talkInterim').textContent = '💡 聽到「' + fLabel + '」，已先翻成' + langOf(srcSel.value).label +
+        '。要翻得準，請把上方語言其中一個改成' + fLabel;
+    }
     if (ttsOn) speakMeeting(r.out, r.toLang);
   } catch (e) {
     $('talkInterim').textContent = '⚠️ 翻譯失敗，請檢查網路';
@@ -685,7 +701,7 @@ function startMeeting() {
   try { r.start(); } catch (e) {}
   $('meetingBtn').classList.add('listening');
   $('meetingBtn').textContent = '⏹ 結束對話';
-  $('talkInterim').textContent = '🔴 收音中，開始交談吧…';
+  $('talkInterim').textContent = '🔴 收音中（主要聽「' + langOf(srcSel.value).label + '」），開始交談吧…';
 }
 
 function stopMeeting() {
