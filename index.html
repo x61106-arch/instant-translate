@@ -278,7 +278,24 @@ if (!SR) {
 // 官方 Cloud Translation API v2（金鑰已鎖定只能從本網站呼叫）
 const TRANSLATE_API_KEY = 'AIzaSyCXwtxQZtI7CYuK7szDRQ6cYePgo-SmE9E';
 
+// 每月免費額度 50 萬字：本裝置自行計數，額滿即停止翻譯，跨月自動歸零恢復
+const MONTHLY_QUOTA = 500000;
+const QUOTA_MSG = '⛔ 本月 50 萬字免費翻譯額度已用完，下個月 1 號自動恢復';
+function quotaMonth() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1); }
+function quotaUsed() {
+  if (localStorage.getItem('quotaMonth') !== quotaMonth()) {
+    localStorage.setItem('quotaMonth', quotaMonth());
+    localStorage.setItem('quotaUsed', '0');
+  }
+  return Number(localStorage.getItem('quotaUsed') || 0);
+}
+function addQuota(n) {
+  localStorage.setItem('quotaUsed', String(quotaUsed() + n));
+}
+const transErrMsg = e => e && e.message === 'quota-exceeded' ? QUOTA_MSG : '⚠️ 翻譯失敗，請檢查網路';
+
 async function callTranslateApi(text, sl, tl) {
+  if (quotaUsed() + text.length > MONTHLY_QUOTA) throw new Error('quota-exceeded');
   const body = { q: text, target: tl, format: 'text' };
   if (sl && sl !== 'auto') body.source = sl;
   const res = await fetch('https://translation.googleapis.com/language/translate/v2?key=' + TRANSLATE_API_KEY, {
@@ -287,6 +304,7 @@ async function callTranslateApi(text, sl, tl) {
     body: JSON.stringify(body)
   });
   if (!res.ok) throw new Error('translate failed ' + res.status);
+  addQuota(text.length);
   const t = (await res.json()).data.translations[0];
   return { out: t.translatedText, detected: t.detectedSourceLanguage || '' };
 }
@@ -367,7 +385,7 @@ async function handleFinal(text) {
     addHistory(text, out);
     if (ttsOn) speak(out, dstSel.value);
   } catch (e) {
-    $('status').textContent = '⚠️ 翻譯失敗，請檢查網路';
+    $('status').textContent = transErrMsg(e);
   }
 }
 
@@ -512,7 +530,7 @@ async function doTypeTranslate() {
     $('status').textContent = '';
     $('typeInput').value = '';
   } catch (e) {
-    $('status').textContent = '⚠️ 翻譯失敗，請檢查網路';
+    $('status').textContent = transErrMsg(e);
   }
 }
 $('typeBtn').onclick = doTypeTranslate;
@@ -626,7 +644,7 @@ async function processUtterance(text) {
     }
     if (ttsOn) speakMeeting(r.out, r.toLang);
   } catch (e) {
-    $('talkInterim').textContent = '⚠️ 翻譯失敗，請檢查網路';
+    $('talkInterim').textContent = transErrMsg(e);
   }
 }
 
