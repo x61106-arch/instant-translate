@@ -368,6 +368,27 @@ function scheduleInterimTranslate(text) {
   }, 450);
 }
 
+// 把辨識錯誤代碼翻成白話，回傳空字串代表可忽略
+function recErrorMsg(code) {
+  switch (code) {
+    case 'not-allowed':
+    case 'service-not-allowed':
+      return '⚠️ 麥克風被封鎖了：點網址列旁的鎖頭圖示 → 麥克風 → 允許，然後重新整理';
+    case 'audio-capture':
+      return '⚠️ 找不到麥克風：檢查電腦有沒有接麥克風，以及 Windows 設定 → 隱私權 → 麥克風是否開啟';
+    case 'network':
+      return '⚠️ 連不上語音辨識服務：檢查網路；若是公司網路可能被防火牆擋住';
+    case 'language-not-supported':
+      return '⚠️ 這個瀏覽器不支援此語言的辨識，請改用 Google Chrome';
+    case 'no-speech':
+      return '沒聽到聲音，繼續聆聽中…';
+    case 'aborted':
+      return '';
+    default:
+      return '⚠️ 語音辨識出錯：' + code + '（建議改用 Google Chrome 試試）';
+  }
+}
+
 function buildRecognition() {
   const r = new SR();
   r.lang = langOf(srcSel.value).speech;
@@ -391,13 +412,10 @@ function buildRecognition() {
     }
   };
   r.onerror = ev => {
-    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
-      stopListening();
-      $('status').textContent = '⚠️ 請允許使用麥克風（點網址列旁的鎖頭圖示）';
-    } else if (ev.error === 'no-speech') {
-      $('status').textContent = '沒聽到聲音，繼續聆聽中…';
-    } else if (ev.error !== 'aborted') {
-      $('status').textContent = '⚠️ 語音辨識出錯：' + ev.error;
+    const msg = recErrorMsg(ev.error);
+    if (msg) {
+      if (ev.error !== 'no-speech') stopListening();
+      $('status').textContent = msg;
     }
   };
   r.onend = () => {
@@ -631,9 +649,10 @@ function startMeeting() {
     if (interim.trim()) $('talkInterim').textContent = interim.trim();
   };
   r.onerror = ev => {
-    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+    const msg = recErrorMsg(ev.error);
+    if (msg && ev.error !== 'no-speech') {
       stopMeeting();
-      $('talkInterim').textContent = '⚠️ 請允許使用麥克風（點網址列旁的鎖頭圖示）';
+      $('talkInterim').textContent = msg;
     }
   };
   r.onend = () => {
