@@ -150,17 +150,17 @@
   .bubble.b { align-self: flex-end; background: #3b3470; border-bottom-right-radius: 4px; }
   .bubble .speak { background: none; border: none; font-size: 1rem; cursor: pointer; padding: 0 2px; }
   .talk-interim { text-align: center; color: var(--muted); min-height: 1.5em; font-size: 1rem; }
-  .talk-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-bottom: 20px; }
-  .talk-btns button {
-    padding: 20px 8px; border-radius: var(--radius); border: none; color: #fff;
-    font-size: 1.05rem; font-weight: 700; cursor: pointer; transition: all .2s;
+  .meeting-btn {
+    padding: 20px; border-radius: var(--radius); border: none; color: #fff;
+    font-size: 1.1rem; font-weight: 700; cursor: pointer; margin-bottom: 20px;
+    background: linear-gradient(145deg, #2563eb, #38bdf8);
+    box-shadow: 0 4px 16px rgba(56,189,248,.25); transition: all .2s;
   }
-  #talkA { background: linear-gradient(145deg, #2563eb, #38bdf8); box-shadow: 0 4px 16px rgba(56,189,248,.25); }
-  #talkB { background: linear-gradient(145deg, #7c3aed, #a78bfa); box-shadow: 0 4px 16px rgba(167,139,250,.25); }
-  .talk-btns button.listening {
-    background: linear-gradient(145deg, #ef4444, #f87171) !important;
+  .meeting-btn.listening {
+    background: linear-gradient(145deg, #ef4444, #f87171);
     animation: pulse 1.4s infinite;
   }
+  .talk-head .btns { display: flex; gap: 14px; }
 </style>
 </head>
 <body>
@@ -196,15 +196,15 @@
 
   <div class="talk-area" id="talkArea" style="display:none">
     <div class="talk-head">
-      <h2>輪流按下方自己語言的按鈕說話</h2>
-      <button id="talkClear">清除</button>
+      <h2 id="talkPair"></h2>
+      <div class="btns">
+        <button id="talkCopy">複製全部</button>
+        <button id="talkClear">清除</button>
+      </div>
     </div>
     <div class="bubbles" id="bubbles"></div>
     <div class="talk-interim" id="talkInterim"></div>
-    <div class="talk-btns">
-      <button id="talkA">🎤</button>
-      <button id="talkB">🎤</button>
-    </div>
+    <button class="meeting-btn" id="meetingBtn">▶ 開始對話</button>
   </div>
 
   <div class="mic-row">
@@ -486,14 +486,18 @@ async function doTypeTranslate() {
 $('typeBtn').onclick = doTypeTranslate;
 $('typeInput').addEventListener('keydown', e => { if (e.key === 'Enter') doTypeTranslate(); });
 
-/* ---------- 雙向對話模式 ---------- */
+/* ---------- 雙向對話模式（會議收音） ---------- */
 let mode = localStorage.getItem('mode') || 'single';
-let talkSide = null;
-let talkRec = null;
+let meetingOn = false;
+let meetingRec = null;
+let speaking = false; // TTS 播放中暫停收音，避免麥克風收到自己的朗讀聲
+let talkLog = [];
+try { talkLog = JSON.parse(localStorage.getItem('talkLog') || '[]'); } catch (e) {}
+
+const baseLang = c => (c || '').toLowerCase().split('-')[0];
 
 function updateTalkLabels() {
-  $('talkA').textContent = '🎤 ' + langOf(srcSel.value).label;
-  $('talkB').textContent = '🎤 ' + langOf(dstSel.value).label;
+  $('talkPair').textContent = langOf(srcSel.value).label + ' ⇄ ' + langOf(dstSel.value).label;
 }
 
 function applyMode() {
@@ -507,11 +511,15 @@ function applyMode() {
   document.querySelector('.history').style.display = talk ? 'none' : '';
   $('talkArea').style.display = talk ? '' : 'none';
   if (talk) { if (listening) stopListening(); updateTalkLabels(); }
-  else { stopTalk(); }
+  else { stopMeeting(); }
   localStorage.setItem('mode', mode);
 }
 
-function addBubble(side, orig, trans, toLang) {
+function saveTalkLog() {
+  try { localStorage.setItem('talkLog', JSON.stringify(talkLog.slice(-200))); } catch (e) {}
+}
+
+function addBubble(side, orig, trans, toLang, save) {
   const div = document.createElement('div');
   div.className = 'bubble ' + (side === 'A' ? 'a' : 'b');
   const o = document.createElement('div'); o.className = 'orig'; o.textContent = orig;
@@ -523,78 +531,144 @@ function addBubble(side, orig, trans, toLang) {
   div.append(o, t);
   $('bubbles').append(div);
   $('bubbles').scrollTop = $('bubbles').scrollHeight;
+  if (save) {
+    talkLog.push({ side, orig, trans, toLang });
+    saveTalkLog();
+  }
 }
 
-async function handleTalkFinal(text, side, from, to) {
-  $('talkInterim').textContent = '翻譯中…';
+function renderTalkLog() {
+  $('bubbles').textContent = '';
+  talkLog.forEach(i => addBubble(i.side, i.orig, i.trans, i.toLang, false));
+}
+
+async function translateDetect(text, tl) {
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=' +
+    encodeURIComponent(tl) + '&dt=t&q=' + encodeURIComponent(text);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('translate failed');
+  const data = await res.json();
+  return { out: (data[0] || []).map(seg => seg[0]).join(''), detected: data[2] || '' };
+}
+
+// 依字元範圍判斷語言（免費翻譯端點對中文的偵測不可靠，字元判斷優先）
+function detectByScript(text) {
+  if (/[぀-ヿ]/.test(text)) return 'ja';   // 假名（要在漢字之前判斷）
+  if (/[가-힯]/.test(text)) return 'ko';   // 韓文
+  if (/[฀-๿]/.test(text)) return 'th';   // 泰文
+  if (/[一-鿿]/.test(text)) return 'zh';   // 漢字
+  if (/[Ѐ-ӿ]/.test(text)) return 'ru';   // 西里爾字母
+  return '';
+}
+
+async function processUtterance(text) {
   try {
-    const out = await translateText(text, from, to);
-    addBubble(side, text, out, to);
-    $('talkInterim').textContent = '';
-    if (ttsOn) speak(out, to);
+    // 判斷這句是誰說的：是右邊語言 → 對方（B），翻回左邊；否則當自己（A），翻到右邊
+    const guess = detectByScript(text);
+    const isDst = g => g && g === baseLang(dstSel.value) && g !== baseLang(srcSel.value);
+    let side = 'A', out, toLang = dstSel.value;
+    if (guess) {
+      if (isDst(guess)) {
+        side = 'B'; toLang = srcSel.value;
+        out = await translateText(text, dstSel.value, srcSel.value);
+      } else {
+        out = await translateText(text, srcSel.value, dstSel.value);
+      }
+    } else {
+      const first = await translateDetect(text, dstSel.value);
+      if (isDst(baseLang(first.detected))) {
+        side = 'B'; toLang = srcSel.value;
+        out = await translateText(text, first.detected, srcSel.value);
+      } else {
+        out = first.out;
+      }
+    }
+    addBubble(side, text, out, toLang, true);
+    if (ttsOn) speakMeeting(out, toLang);
   } catch (e) {
     $('talkInterim').textContent = '⚠️ 翻譯失敗，請檢查網路';
   }
 }
 
-function startTalk(side) {
+function speakMeeting(text, langCode) {
+  if (!('speechSynthesis' in window) || !text) { return; }
+  speaking = true;
+  if (meetingRec) { try { meetingRec.stop(); } catch (e) {} }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = langOf(langCode).speech;
+  const voice = speechSynthesis.getVoices().find(v => v.lang.replace('_','-').startsWith(langOf(langCode).speech.split('-')[0]));
+  if (voice) u.voice = voice;
+  u.onend = u.onerror = () => {
+    speaking = false;
+    if (meetingOn && meetingRec) { try { meetingRec.start(); } catch (e) {} }
+  };
+  speechSynthesis.speak(u);
+}
+
+function startMeeting() {
   if (!SR) return;
-  if (talkSide) { stopTalk(); return; }
-  const from = side === 'A' ? srcSel.value : dstSel.value;
-  const to   = side === 'A' ? dstSel.value : srcSel.value;
-  talkSide = side;
-  const btn = side === 'A' ? $('talkA') : $('talkB');
-  btn.classList.add('listening');
-  $('talkInterim').textContent = '🔴 聆聽中，請說話…';
+  meetingOn = true;
   const r = new SR();
-  talkRec = r;
-  r.lang = langOf(from).speech;
-  r.continuous = false;
+  meetingRec = r;
+  r.lang = langOf(srcSel.value).speech;
+  r.continuous = true;
   r.interimResults = true;
-  let gotFinal = false;
   r.onresult = ev => {
-    let finalText = '', interim = '';
-    for (let i = 0; i < ev.results.length; i++) {
+    let interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const t = ev.results[i][0].transcript;
-      if (ev.results[i].isFinal) finalText += t; else interim += t;
+      if (ev.results[i].isFinal) {
+        const txt = t.trim();
+        if (txt) {
+          $('talkInterim').textContent = '';
+          processUtterance(txt);
+        }
+      } else {
+        interim += t;
+      }
     }
     if (interim.trim()) $('talkInterim').textContent = interim.trim();
-    if (finalText.trim() && !gotFinal) {
-      gotFinal = true;
-      handleTalkFinal(finalText.trim(), side, from, to);
-    }
   };
   r.onerror = ev => {
     if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      stopMeeting();
       $('talkInterim').textContent = '⚠️ 請允許使用麥克風（點網址列旁的鎖頭圖示）';
-    } else if (ev.error === 'no-speech') {
-      $('talkInterim').textContent = '沒聽到聲音，再按一次試試';
     }
   };
   r.onend = () => {
-    btn.classList.remove('listening');
-    talkSide = null;
-    talkRec = null;
-    if (!gotFinal && $('talkInterim').textContent.startsWith('🔴')) {
-      $('talkInterim').textContent = '';
-    }
+    if (meetingOn && !speaking) { try { r.start(); } catch (e) {} }
   };
   try { r.start(); } catch (e) {}
+  $('meetingBtn').classList.add('listening');
+  $('meetingBtn').textContent = '⏹ 結束對話';
+  $('talkInterim').textContent = '🔴 收音中，開始交談吧…';
 }
 
-function stopTalk() {
-  if (talkRec) { try { talkRec.stop(); } catch (e) {} }
-  $('talkA').classList.remove('listening');
-  $('talkB').classList.remove('listening');
-  talkSide = null;
+function stopMeeting() {
+  meetingOn = false;
+  if (meetingRec) { meetingRec.onend = null; try { meetingRec.stop(); } catch (e) {} meetingRec = null; }
+  $('meetingBtn').classList.remove('listening');
+  $('meetingBtn').textContent = '▶ 開始對話';
+  if ($('talkInterim').textContent.startsWith('🔴')) $('talkInterim').textContent = '';
 }
 
 $('modeSingle').onclick = () => { mode = 'single'; applyMode(); };
 $('modeTalk').onclick = () => { mode = 'talk'; applyMode(); };
-$('talkA').onclick = () => startTalk('A');
-$('talkB').onclick = () => startTalk('B');
-$('talkClear').onclick = () => { $('bubbles').textContent = ''; };
+$('meetingBtn').onclick = () => meetingOn ? stopMeeting() : startMeeting();
+$('talkClear').onclick = () => { talkLog = []; saveTalkLog(); $('bubbles').textContent = ''; };
+$('talkCopy').onclick = async () => {
+  if (!talkLog.length) return;
+  const textOut = talkLog.map(i => i.orig + '\n→ ' + i.trans).join('\n\n');
+  try {
+    await navigator.clipboard.writeText(textOut);
+    $('talkInterim').textContent = '✅ 已複製全部對話';
+  } catch (e) {
+    $('talkInterim').textContent = '⚠️ 複製失敗';
+  }
+};
 
+renderTalkLog();
 updateTalkLabels();
 applyMode();
 </script>
