@@ -150,6 +150,7 @@
   .bubble.b { align-self: flex-end; background: #3b3470; border-bottom-right-radius: 4px; }
   .bubble .speak { background: none; border: none; font-size: 1rem; cursor: pointer; padding: 0 2px; }
   .talk-interim { text-align: center; color: var(--muted); min-height: 1.5em; font-size: 1rem; }
+  .talk-live { text-align: center; color: var(--accent); min-height: 1.6em; font-size: 1.15rem; font-weight: 600; margin-bottom: 12px; }
   .meeting-btn {
     padding: 20px; border-radius: var(--radius); border: none; color: #fff;
     font-size: 1.1rem; font-weight: 700; cursor: pointer; margin-bottom: 20px;
@@ -204,6 +205,7 @@
     </div>
     <div class="bubbles" id="bubbles"></div>
     <div class="talk-interim" id="talkInterim"></div>
+    <div class="talk-live" id="talkLive"></div>
     <button class="meeting-btn" id="meetingBtn">▶ 開始對話</button>
   </div>
 
@@ -365,7 +367,7 @@ function scheduleInterimTranslate(text) {
       const out = await translateText(text, srcSel.value, dstSel.value);
       if (listening) setDstText(out, true);
     } catch (e) { /* interim errors are silent */ }
-  }, 450);
+  }, 300);
 }
 
 // 把辨識錯誤代碼翻成白話，回傳空字串代表可忽略
@@ -579,33 +581,51 @@ function detectByScript(text) {
   return '';
 }
 
+// 判斷這句是誰說的：是右邊語言 → 對方（B），翻回左邊；否則當自己（A），翻到右邊
+async function smartTranslate(text) {
+  const guess = detectByScript(text);
+  const isDst = g => g && g === baseLang(dstSel.value) && g !== baseLang(srcSel.value);
+  if (guess) {
+    if (isDst(guess)) {
+      return { side: 'B', toLang: srcSel.value, out: await translateText(text, dstSel.value, srcSel.value) };
+    }
+    return { side: 'A', toLang: dstSel.value, out: await translateText(text, srcSel.value, dstSel.value) };
+  }
+  const first = await translateDetect(text, dstSel.value);
+  if (isDst(baseLang(first.detected))) {
+    return { side: 'B', toLang: srcSel.value, out: await translateText(text, first.detected, srcSel.value) };
+  }
+  return { side: 'A', toLang: dstSel.value, out: first.out };
+}
+
 async function processUtterance(text) {
   try {
-    // 判斷這句是誰說的：是右邊語言 → 對方（B），翻回左邊；否則當自己（A），翻到右邊
-    const guess = detectByScript(text);
-    const isDst = g => g && g === baseLang(dstSel.value) && g !== baseLang(srcSel.value);
-    let side = 'A', out, toLang = dstSel.value;
-    if (guess) {
-      if (isDst(guess)) {
-        side = 'B'; toLang = srcSel.value;
-        out = await translateText(text, dstSel.value, srcSel.value);
-      } else {
-        out = await translateText(text, srcSel.value, dstSel.value);
-      }
-    } else {
-      const first = await translateDetect(text, dstSel.value);
-      if (isDst(baseLang(first.detected))) {
-        side = 'B'; toLang = srcSel.value;
-        out = await translateText(text, first.detected, srcSel.value);
-      } else {
-        out = first.out;
-      }
-    }
-    addBubble(side, text, out, toLang, true);
-    if (ttsOn) speakMeeting(out, toLang);
+    const r = await smartTranslate(text);
+    addBubble(r.side, text, r.out, r.toLang, true);
+    if (ttsOn) speakMeeting(r.out, r.toLang);
   } catch (e) {
     $('talkInterim').textContent = '⚠️ 翻譯失敗，請檢查網路';
   }
+}
+
+// 邊講邊翻：話還沒說完就先翻譯預覽，講完停頓才收進泡泡
+let talkLiveTimer = null;
+let talkLiveSeq = 0;
+function scheduleTalkLive(text) {
+  clearTimeout(talkLiveTimer);
+  const seq = ++talkLiveSeq;
+  talkLiveTimer = setTimeout(async () => {
+    try {
+      const r = await smartTranslate(text);
+      if (meetingOn && seq === talkLiveSeq) $('talkLive').textContent = r.out;
+    } catch (e) { /* 預覽失敗就靜默，等正式翻譯 */ }
+  }, 300);
+}
+
+function clearTalkLive() {
+  clearTimeout(talkLiveTimer);
+  talkLiveSeq++;
+  $('talkLive').textContent = '';
 }
 
 function speakMeeting(text, langCode) {
@@ -640,13 +660,17 @@ function startMeeting() {
         const txt = t.trim();
         if (txt) {
           $('talkInterim').textContent = '';
+          clearTalkLive();
           processUtterance(txt);
         }
       } else {
         interim += t;
       }
     }
-    if (interim.trim()) $('talkInterim').textContent = interim.trim();
+    if (interim.trim()) {
+      $('talkInterim').textContent = interim.trim();
+      scheduleTalkLive(interim.trim());
+    }
   };
   r.onerror = ev => {
     const msg = recErrorMsg(ev.error);
@@ -667,6 +691,7 @@ function startMeeting() {
 function stopMeeting() {
   meetingOn = false;
   if (meetingRec) { meetingRec.onend = null; try { meetingRec.stop(); } catch (e) {} meetingRec = null; }
+  clearTalkLive();
   $('meetingBtn').classList.remove('listening');
   $('meetingBtn').textContent = '▶ 開始對話';
   if ($('talkInterim').textContent.startsWith('🔴')) $('talkInterim').textContent = '';
